@@ -6,10 +6,16 @@ This document describes the implementation in `app/` and `mcp_server.py`. The pr
 
 - **Static dashboard (`app/static/index.html`)** collects a name, sample outputs, and proposed tool arguments. It calls the HTTP API, renders the result using DOM text nodes, keeps the latest successful response in page memory, and sends that response to the export route on download.
 - **FastAPI application (`app/main.py`)** serves the dashboard and health check, validates audit requests, returns audit reports, and validates/serializes report exports.
+- **Database layer (`app/database.py`, `app/models.py`)** configures SQLAlchemy sessions from environment variables and maps completed reports to relational audit records. Findings and tool traces are stored in JSON columns.
+- **Alembic (`alembic.ini`, `migrations/`)** applies reviewed schema migrations. The API does not create production tables at startup.
 - **Schemas (`app/schemas.py`)** define `AuditRequest`, `Finding`, `ToolTrace`, and `AuditReport` with Pydantic.
 - **Deterministic planner (`app/agent.py`)** runs the bounded checks in sequence, adds finding IDs and point contributions, collects execution traces, computes the score and risk band, and constructs the response.
 - **Audit functions (`app/tools.py`)** perform email/phone pattern matching, fixed prompt-injection marker matching, and proposed argument allowlist/bound checks.
 - **MCP server (`mcp_server.py`)** registers three FastMCP tools that wrap those same audit functions. It uses stdio transport and is launched independently from FastAPI.
+
+The local non-Docker default uses SQLite. Docker Compose connects the API and a one-shot migration service to PostgreSQL, with a named volume for persistent records.
+
+`app/database.py` is the shared URL source for the API engine and Alembic. Compose passes the same `.env` `POSTGRES_*` values to the database, migration, and API services; `DATABASE_URL` is mutually exclusive with those fields. A SQLAlchemy `URL` masks its password in `str(url)`, so Alembic uses `render_database_url_for_alembic()` to serialize the URL with credentials percent-encoded for its in-memory config. This avoids a redacted password reaching the driver while keeping credentials out of source and logs.
 
 ## HTTP audit flow
 
@@ -27,12 +33,15 @@ flowchart TD
     I --> P
     T --> P
     P --> R[AuditReport: findings, score, rationale, trace]
-    R --> D
+    R --> DB[(SQLAlchemy database)]
+    DB --> D
     D -->|latest in-page response| E[POST /api/audits/export]
     E -->|AuditReport validation and UTF-8 JSON attachment| D
 ```
 
 The export request goes back through FastAPI and Pydantic; it does not re-run the audit. The dashboard's latest report exists only in page memory and is lost on reload.
+
+History uses validated `limit` and `offset` parameters and orders by `created_at` descending, then `audit_id` descending. A detail route retrieves one persisted report. Compose waits for PostgreSQL health, runs Alembic migrations, then starts the API.
 
 ## MCP flow
 
@@ -53,10 +62,13 @@ The MCP server exposes `scan_outputs`, `scan_injection_signals`, and `check_tool
 3. **Proposed arguments:** only the names `query`, `limit`, `language`, `top_k`, and `document_id` are allowed. String values are bounded at 500 characters; `limit` and `top_k` must be integer values from 1 through 100. These proposed arguments are inspected, not executed.
 4. **MCP client to MCP tools:** FastMCP/Pydantic validates tool argument types. The wrappers reject more than 100 output samples or more than 50 argument entries before calling the helper functions.
 5. **Dashboard to export route:** the browser sends the last API response as JSON. FastAPI validates it as an `AuditReport` before serializing it to an attachment. Report fields such as evidence and trace are accepted as report data; this route does not recompute whether the report is truthful.
+6. **API to database:** audit input-derived evidence is stored in the configured local database. Credentials are supplied through environment variables; `.env` is excluded from Git and the Docker build context. SQLAlchemy errors receive generic HTTP 503 responses without including database details.
 
 ## Failure handling
 
 - Invalid HTTP request bodies or export report objects are rejected by FastAPI/Pydantic with HTTP 422.
+- `/health` is a liveness check; `/ready` queries the database and returns HTTP 503 when it is unavailable.
+- Audit persistence and history operations return a generic HTTP 503 on SQLAlchemy errors. The history schema must be applied by Alembic before the API can persist reports.
 - `POST /api/audits` catches an exception escaping `run_audit` and returns a generic HTTP 500 detail (`Audit failed safely.`). It does not expose the exception message in that response.
 - The planner wraps each individual tool call. An exception creates a trace entry with status `error` and a summary containing the exception type; remaining checks continue. The report's risk score is calculated from findings, not tool failures, so a failed check can leave a low score. Inspect the trace when reviewing results.
 - The MCP wrappers raise on configured input-count limits; FastMCP returns tool errors for invocation/validation failures.
@@ -64,4 +76,4 @@ The MCP server exposes `scan_outputs`, `scan_injection_signals`, and `check_tool
 
 ## Data handling notes
 
-There is no database or server-side audit history. API responses and downloaded files can contain evidence snippets derived from supplied text. Do not use real personal information, credentials, or confidential content in this educational demo. Regex matching and marker matching are incomplete and can both miss and over-report cases. Neither this architecture nor its score establishes privacy or security compliance.
+Completed FastAPI audit reports are stored in SQLite for the default local setup or PostgreSQL with Docker Compose. API responses, history, and downloaded files can contain evidence snippets derived from supplied text. Do not use real personal information, credentials, or confidential content in this educational demo. Restrict database access and use backups/reset commands carefully. Regex matching and marker matching are incomplete and can both miss and over-report cases. Neither this architecture nor its score establishes privacy or security compliance.

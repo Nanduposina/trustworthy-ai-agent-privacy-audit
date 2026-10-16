@@ -30,6 +30,9 @@ The project explores how validation, constrained tool interfaces, and traceable 
 - Allowlist and bounds checks for proposed tool arguments; proposed arguments are inspected, not executed.
 - Per-finding score contributions and a deterministic aggregate risk level.
 - Three MCP tools available over stdio: `scan_outputs`, `scan_injection_signals`, and `check_tool_arguments`.
+- PostgreSQL-backed audit history with bounded pagination and deterministic ordering.
+- Alembic-managed database migrations; the app does not create production tables at startup.
+- Docker Compose services for the API, PostgreSQL, and migration step, with readiness and database health checks.
 - Automated API, scanner, MCP invocation, risk-scoring, and export tests.
 
 ## Architecture
@@ -46,6 +49,7 @@ See [docs/architecture.md](docs/architecture.md) for component responsibilities,
 - pytest and HTTPX
 - Static HTML, CSS, and browser JavaScript
 - Docker and Docker Compose as an optional local run method
+- SQLAlchemy 2.x, Alembic, PostgreSQL, and psycopg 3 for persistence
 
 Dependency ranges are listed in [requirements.txt](requirements.txt). There are no external service credentials or model dependencies.
 
@@ -77,6 +81,59 @@ Start the dashboard and API from the project root:
 ```
 
 Open <http://127.0.0.1:8000/> for the dashboard, <http://127.0.0.1:8000/health> for the health response, and <http://127.0.0.1:8000/docs> for the generated API documentation. Stop the development server with `Ctrl+C`.
+
+The default local configuration uses a SQLite file named `audit.db` in the project root. Apply its schema before starting the API:
+
+```powershell
+alembic upgrade head
+```
+
+Check `/ready` to confirm that the configured database can be reached. To create a migration after changing the SQLAlchemy models, use `alembic revision --autogenerate -m "describe change"`, review the generated migration, then apply it with `alembic upgrade head`.
+
+### Run with Docker Compose and PostgreSQL
+
+Install Docker Desktop and start its engine. Copy the safe example environment file, then replace the placeholder password with a strong local password:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+docker compose up --build
+```
+
+Compose starts PostgreSQL, waits for its health check, applies Alembic migrations, then starts the API. The published port is bound to localhost; open <http://127.0.0.1:8000/> and use `/ready` to check API and database readiness. If port 8000 is already occupied, set `APP_PORT=8767` in `.env` (or in the PowerShell environment for that Compose command) and use <http://127.0.0.1:8767/>. PostgreSQL data is kept in the named `postgres_data` volume across container restarts. Credentials are read from `.env`, which is excluded from Git and the Docker build context. Never commit real credentials.
+
+The Compose database, migration, and API services all receive the same `POSTGRES_*` values from `.env`. Do not define `DATABASE_URL` alongside them; the application rejects mixed configuration. SQLAlchemy's `URL` object is shared by FastAPI and Alembic. Alembic must render that object with its password visible to the in-memory config parser (which percent-encodes special characters); calling `str(URL)` masks the password as `***` and causes PostgreSQL authentication failures. The password is not printed by application or migration code.
+
+If authentication fails after changing `.env`, first rebuild and rerun the migration/API services:
+
+```powershell
+docker compose up -d --build api
+```
+
+An existing PostgreSQL volume keeps the role password from its initial database setup; changing `.env` alone does not change that role. If a TCP probe confirms that the role password in PostgreSQL is stale, connect through the container's local socket and update it interactively without putting it in a command or shell history:
+
+```powershell
+docker compose exec db psql -U privacy_audit -d privacy_audit
+```
+
+At the `psql` prompt, run `\password privacy_audit` and enter the desired `.env` password at the hidden prompts, then `\q`. Substitute the configured role/database names if they differ. Verify TCP authentication without displaying the password, then rerun the migration/API command above:
+
+```powershell
+docker compose exec -T db sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT current_user, current_database();"'
+```
+
+Do not remove the volume to resolve authentication problems; volume deletion removes stored audit reports.
+
+Stop the services while preserving audit records with `docker compose down`.
+
+To reset the local database and start with empty history:
+
+```powershell
+docker compose down --volumes
+docker compose up --build
+```
+
+**Warning:** `docker compose down --volumes` deletes the PostgreSQL volume and all audit records stored in it. The root-level SQLite `audit.db` used for non-Docker local development is separate and is not affected by this Compose reset.
 
 To run the separate MCP stdio server for an MCP-compatible client:
 
@@ -118,6 +175,12 @@ Returns:
   "service": "trustworthy-ai-privacy-audit"
 }
 ```
+
+This is a liveness endpoint and does not query the database.
+
+### `GET /ready`
+
+Runs a lightweight database query and returns `{"status":"ready","database":"ok"}` when the configured database is reachable. Database connection failures return HTTP 503 with a generic message.
 
 ### `POST /api/audits`
 
@@ -214,6 +277,18 @@ The response follows the `AuditReport` schema. In this example, the email-like v
 
 The documented fields match `AuditRequest`, `AuditReport`, `Finding`, and `ToolTrace` in [app/schemas.py](app/schemas.py). `model_name` in the response is populated from the request's `name`.
 
+### `GET /api/audits`
+
+Returns persisted reports in deterministic newest-first order (`created_at` descending, then `audit_id` descending). Query parameters are `limit` (default 20, range 1–100) and `offset` (default 0, range 0–1,000,000). The response contains `total`, `limit`, `offset`, and an `items` array of `AuditReport` objects.
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8000/api/audits?limit=20&offset=0"
+```
+
+### `GET /api/audits/{audit_id}`
+
+Returns one persisted report using the existing `AuditReport` schema, or HTTP 404 if the ID is not found. Invalid pagination parameters return HTTP 422. Database failures on persistence, history, detail, or readiness operations return HTTP 503 without exposing connection details.
+
 ### `POST /api/audits/export`
 
 Accepts a complete `AuditReport` JSON object, validates it against the same response schema, and returns an `application/json` attachment named `audit-report.json`. The dashboard offers this download for the latest successful report in the current page; refreshing the page clears that in-memory report.
@@ -257,7 +332,8 @@ Use the dashboard's **Download latest report (JSON)** button after running an au
 - Scoring adds severity points without modeling context, likelihood, or impact. Overlapping findings are counted separately and can inflate the result.
 - Tool failures appear in the execution trace. Risk scoring is based on findings, so a failed check does not itself add risk points; inspect the trace when reviewing an audit.
 - Proposed tool arguments are validated but not executed. The app does not inspect model weights or run model inference.
-- There is no database or server-side audit history. Do not submit real personal data, credentials, or confidential information.
+- The API has no user authentication or authorization. Compose binds its port to localhost for local evaluation; add an appropriate access-control layer before any shared or public deployment.
+- Audit reports are persisted locally in SQLite or in the PostgreSQL database configured for Compose. Stored findings and traces may contain evidence snippets derived from sample text. Do not submit real personal data, credentials, or confidential information. Restrict access to the local database and back it up or reset it deliberately.
 
 This project does **not** claim formal privacy or security compliance, production security assurance, or complete prompt-injection protection. Findings and scores are educational heuristics only and can produce false positives and false negatives.
 

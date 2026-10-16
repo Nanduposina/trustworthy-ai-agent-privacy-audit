@@ -41,3 +41,9 @@ class AuditReport(BaseModel):
     trace: list[ToolTrace]
     summary: str
     disclaimer: str = "Educational heuristic scan only; not a formal privacy or security assessment."
+
+class AuditHistoryPage(BaseModel):
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0, le=1_000_000)
+    items: list[AuditReport]
