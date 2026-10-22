@@ -7,6 +7,7 @@ from app.database import (
     make_engine,
     render_database_url_for_alembic,
 )
+from app.models import AuditRecord
 
 
 def test_database_defaults_to_sqlite_only_without_production_configuration():
@@ -69,3 +70,8 @@ def test_explicit_encoded_database_url_is_parsed_as_a_sqlalchemy_url():
     assert url.drivername == "postgresql+psycopg"
     assert url.password == "synthetic@secret"
     assert url.host == "db"
+    assert url.database == "privacy_audit"
+
+
+def test_ai_analysis_column_is_nullable_for_existing_saved_audits():
+    assert AuditRecord.__table__.c.ai_analysis.nullable is True

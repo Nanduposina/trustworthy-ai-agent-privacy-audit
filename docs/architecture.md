@@ -1,79 +1,75 @@
 # Architecture and request flow
 
-This document describes the implementation in `app/` and `mcp_server.py`. The project is a local educational prototype: its agent is a deterministic orchestration function, not an LLM planner.
+This document describes the HTTP app and local Ollama integration. Deterministic checks and scoring remain authoritative; the model assessment is optional, separate, and never executes tools.
 
 ## Components
 
-- **Static dashboard (`app/static/index.html`)** collects a name, sample outputs, and proposed tool arguments. It calls the HTTP API, renders the result using DOM text nodes, keeps the latest successful response in page memory, and sends that response to the export route on download.
-- **FastAPI application (`app/main.py`)** serves the dashboard and health check, validates audit requests, returns audit reports, and validates/serializes report exports.
-- **Database layer (`app/database.py`, `app/models.py`)** configures SQLAlchemy sessions from environment variables and maps completed reports to relational audit records. Findings and tool traces are stored in JSON columns.
-- **Alembic (`alembic.ini`, `migrations/`)** applies reviewed schema migrations. The API does not create production tables at startup.
-- **Schemas (`app/schemas.py`)** define `AuditRequest`, `Finding`, `ToolTrace`, and `AuditReport` with Pydantic.
-- **Deterministic planner (`app/agent.py`)** runs the bounded checks in sequence, adds finding IDs and point contributions, collects execution traces, computes the score and risk band, and constructs the response.
-- **Audit functions (`app/tools.py`)** perform email/phone pattern matching, fixed prompt-injection marker matching, and proposed argument allowlist/bound checks.
-- **MCP server (`mcp_server.py`)** registers three FastMCP tools that wrap those same audit functions. It uses stdio transport and is launched independently from FastAPI.
+- **Dashboard (`app/static/index.html`)** collects audit samples and proposed tool arguments, displays rule and AI results separately, loads persisted summary metadata, and exports selected reports. It discloses local sample processing before the opt-in control.
+- **FastAPI (`app/main.py`)** validates audit requests and serves health, readiness, status, privacy-minimized history summaries, full audit history, report, and export routes.
+- **Planner (`app/agent.py`)** runs deterministic scanner functions, builds traces and score contributions, and optionally invokes the configured local AI provider.
+- **Rule tools (`app/tools.py`)** perform email/phone heuristics, phrase-based injection checks, and argument allowlist validation.
+- **Ollama adapter (`app/ollama.py`)** sends only opted-in, bounded and best-effort-redacted sample outputs to `POST /api/chat` on a local host address. It requests JSON Schema output, validates the response and evidence against the redacted sample, and maps transport/validation errors to safe categories. A JSON, schema, or evidence validation failure may receive one correction attempt; transport failures are not retried.
+- **Schemas (`app/schemas.py`)** define requests, rule findings, separate AI findings, audit reports, and history pages. `run_gemini_analysis` is accepted as a legacy opt-in alias; it cannot select or call Gemini.
+- **SQLAlchemy and Alembic (`app/database.py`, `app/models.py`, `migrations/`)** persist completed reports, with PostgreSQL and a named data volume in Compose.
 
-The local non-Docker default uses SQLite. Docker Compose connects the API and a one-shot migration service to PostgreSQL, with a named volume for persistent records.
+The persisted `ai_analysis` field and JSON database column are provider-neutral. The migration that introduced this column retains its historical Gemini filename/revision and must remain in the Alembic chain. `AIAnalysis` accepts the historical `provider="gemini"` value so older saved reports remain readable. The API also retains inert Gemini-named request/status compatibility fields; none can select a cloud provider.
+- **MCP (`mcp_server.py`)** exposes the deterministic helper functions over stdio independently from the HTTP app.
 
-`app/database.py` is the shared URL source for the API engine and Alembic. Compose passes the same `.env` `POSTGRES_*` values to the database, migration, and API services; `DATABASE_URL` is mutually exclusive with those fields. A SQLAlchemy `URL` masks its password in `str(url)`, so Alembic uses `render_database_url_for_alembic()` to serialize the URL with credentials percent-encoded for its in-memory config. This avoids a redacted password reaching the driver while keeping credentials out of source and logs.
+The MCP wrappers enforce the same 100-sample, 8,000-character per-sample, 64,000-character combined sample, and 16,000-byte argument limits as the HTTP schema. The argument tool also caps the number of entries at 50.
 
-## HTTP audit flow
+The runtime provider factory supports only `AI_PROVIDER=ollama` or disabled analysis. It rejects non-local Ollama hostnames and model names tagged `-cloud` or `:cloud`. Compose passes only the local endpoint/model configuration; the project does not require a cloud AI SDK.
+
+## HTTP flow
 
 ```mermaid
 flowchart TD
-    U[Browser user] -->|name, samples, proposed arguments| D[Dashboard]
-    D -->|POST /api/audits JSON| A[FastAPI]
-    A --> V{AuditRequest validation}
+    U[Dashboard user] -->|synthetic samples and proposed args| A[FastAPI]
+    A --> V{Pydantic validation}
     V -->|invalid| X[HTTP 422]
     V -->|valid| P[Deterministic planner]
-    P --> S[Email and phone heuristic]
-    P --> I[Optional injection phrase heuristic]
-    P --> T[Tool argument allowlist check]
-    S --> P
+    P --> E[Email and phone checks]
+    P --> I[Optional injection phrase check]
+    P --> T[Tool argument allowlist]
+    E --> P
     I --> P
     T --> P
-    P --> R[AuditReport: findings, score, rationale, trace]
-    R --> DB[(SQLAlchemy database)]
-    DB --> D
-    D -->|latest in-page response| E[POST /api/audits/export]
-    E -->|AuditReport validation and UTF-8 JSON attachment| D
+    P --> O{Local analysis opted in?}
+    O -->|No or disabled| S[Mark skipped]
+    O -->|Yes and Ollama selected| R[Redact and bound sample]
+    R --> H[Local Ollama HTTP API]
+    H --> J[Validate JSON Schema and evidence]
+    J --> AI[Separate AI summary and findings]
+    P --> Q[Rule score and risk level]
+    S --> Z[Audit report]
+    AI --> Z
+    Q --> Z
+    Z --> DB[(PostgreSQL or SQLite)]
+    DB --> A
 ```
 
-The export request goes back through FastAPI and Pydantic; it does not re-run the audit. The dashboard's latest report exists only in page memory and is lost on reload.
+`run_ai_analysis` is the current opt-in field. The former `run_gemini_analysis` request field remains accepted as an alias so older clients still opt into the selected local provider. No API request field can select a cloud provider.
 
-History uses validated `limit` and `offset` parameters and orders by `created_at` descending, then `audit_id` descending. A detail route retrieves one persisted report. Compose waits for PostgreSQL health, runs Alembic migrations, then starts the API.
+On page load and after each saved audit, the dashboard requests `GET /api/audits/summary` for the real record total and recent metadata. This response omits report findings and evidence. Selecting a history item fetches its full report from `GET /api/audits/{audit_id}`; downloading uses the existing schema-validating export route. An empty database displays an explicit empty state, and failed history requests display an error state rather than invented records.
 
-## MCP flow
+## Trust boundaries and validation
 
-```mermaid
-flowchart LR
-    C[MCP-compatible client] <-->|MCP over stdio| M[mcp_server.py / FastMCP]
-    M --> O[scan_sample_outputs]
-    M --> I[scan_prompt_injection]
-    M --> T[validate_tool_arguments]
-```
-
-The MCP server exposes `scan_outputs`, `scan_injection_signals`, and `check_tool_arguments`. These tools return the helper results directly; they do not create an `AuditReport`, assign aggregate risk, persist data, or call the HTTP server.
-
-## Trust boundaries and validation points
-
-1. **Browser to API:** request JSON is untrusted. `AuditRequest` strips surrounding whitespace from strings, forbids extra request fields, limits `name` to 1–100 characters, `description` to 1,000 characters, and sample count to 100. Pydantic validates field types. The request model does not impose a per-sample string length limit.
-2. **Sample content to heuristics:** samples are treated as text. Email and phone matches are evidence candidates; fixed marker phrases indicate possible injection-like text. No sample text is executed or sent to an external service.
-3. **Proposed arguments:** only the names `query`, `limit`, `language`, `top_k`, and `document_id` are allowed. String values are bounded at 500 characters; `limit` and `top_k` must be integer values from 1 through 100. These proposed arguments are inspected, not executed.
-4. **MCP client to MCP tools:** FastMCP/Pydantic validates tool argument types. The wrappers reject more than 100 output samples or more than 50 argument entries before calling the helper functions.
-5. **Dashboard to export route:** the browser sends the last API response as JSON. FastAPI validates it as an `AuditReport` before serializing it to an attachment. Report fields such as evidence and trace are accepted as report data; this route does not recompute whether the report is truthful.
-6. **API to database:** audit input-derived evidence is stored in the configured local database. Credentials are supplied through environment variables; `.env` is excluded from Git and the Docker build context. SQLAlchemy errors receive generic HTTP 503 responses without including database details.
+1. **Browser to API:** request fields are validated with Pydantic; unknown fields are rejected and sample count/other input bounds are enforced by existing schemas.
+2. **Untrusted sample to deterministic checks:** sample text is data only. Heuristics inspect it but do not execute it. Tool arguments are validated and never executed.
+3. **Opted-in sample to Ollama:** only `sample_outputs` are passed; descriptions and proposed tool arguments are excluded. Common email, phone, credential, and token patterns are redacted before the 8,000-character serialized-input limit is checked. This is incomplete pattern-based minimization, not anonymization or a privacy guarantee. The URL is limited to `localhost`, loopback addresses, or Docker Desktop's `host.docker.internal` over HTTP. Cloud-tagged models are rejected. Use a locally installed model and synthetic content.
+4. **Ollama response:** JSON Schema formatting is requested through the Ollama `format` field, then Pydantic validates returned content. Evidence must occur in the redacted sample. Output is untrusted text; no instructions, commands, or model tool calls are executed.
+5. **Risk score:** only deterministic rule findings contribute points. AI findings remain under `ai_analysis` and cannot affect risk score or severity contributions.
+6. **Database:** audit reports can contain evidence snippets. Compose persists PostgreSQL data in `postgres_data`; migrations run before the API. Do not remove that volume unless intentionally deleting stored audit history.
 
 ## Failure handling
 
-- Invalid HTTP request bodies or export report objects are rejected by FastAPI/Pydantic with HTTP 422.
-- `/health` is a liveness check; `/ready` queries the database and returns HTTP 503 when it is unavailable.
-- Audit persistence and history operations return a generic HTTP 503 on SQLAlchemy errors. The history schema must be applied by Alembic before the API can persist reports.
-- `POST /api/audits` catches an exception escaping `run_audit` and returns a generic HTTP 500 detail (`Audit failed safely.`). It does not expose the exception message in that response.
-- The planner wraps each individual tool call. An exception creates a trace entry with status `error` and a summary containing the exception type; remaining checks continue. The report's risk score is calculated from findings, not tool failures, so a failed check can leave a low score. Inspect the trace when reviewing results.
-- The MCP wrappers raise on configured input-count limits; FastMCP returns tool errors for invocation/validation failures.
-- The dashboard shows request/export errors in its results area. Export is available only after a successful audit response is received.
+- Invalid request bodies return HTTP 422.
+- `/health` checks API liveness; `/ready` checks database access and returns HTTP 503 if it is unavailable.
+- Database failures return generic service-unavailable messages without connection details.
+- An Ollama timeout, unavailable service, HTTP error, malformed JSON, invalid schema, or unsupported evidence results in a sanitized AI status. Deterministic findings and score are returned and persisted normally.
+- The dashboard renders trace entries as separate rows using text-only DOM updates, readable tool labels, status badges, durations, and summaries. AI failure categories are translated into user-facing messages while rule findings remain visible.
+- When AI is disabled or not requested, the response reports `skipped` without fabricating a summary or findings.
+- PostgreSQL schema changes use Alembic migrations rather than creating production tables on API startup.
 
-## Data handling notes
+## Privacy and limitations
 
-Completed FastAPI audit reports are stored in SQLite for the default local setup or PostgreSQL with Docker Compose. API responses, history, and downloaded files can contain evidence snippets derived from supplied text. Do not use real personal information, credentials, or confidential content in this educational demo. Restrict database access and use backups/reset commands carefully. Regex matching and marker matching are incomplete and can both miss and over-report cases. Neither this architecture nor its score establishes privacy or security compliance.
+Ollama runs on the host at `http://host.docker.internal:11434` when called from the API container. The application limits configured URLs to local addresses and rejects model tags marked as cloud-hosted. This does not inspect arbitrary Ollama Modelfiles or guarantee how a locally configured Ollama installation behaves. Samples are sent to the local Ollama process only when a user opts in. Do not submit real personal, confidential, or credential data. Regex checks can miss sensitive text; model output can be wrong or inconsistent; neither the deterministic checks nor local model results establish formal privacy/security compliance or production guarantees.

@@ -24,6 +24,7 @@ class AuditRecord(Base):
     trace: Mapped[list] = mapped_column(JSON, nullable=False)
     summary: Mapped[str] = mapped_column(String, nullable=False)
     disclaimer: Mapped[str] = mapped_column(String, nullable=False)
+    ai_analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     @classmethod
     def from_report(cls, report: AuditReport) -> "AuditRecord":
@@ -47,4 +48,5 @@ class AuditRecord(Base):
             trace=self.trace,
             summary=self.summary,
             disclaimer=self.disclaimer,
+            ai_analysis=self.ai_analysis,
         )

@@ -52,3 +52,17 @@ def test_mcp_check_tool_arguments_rejects_disallowed_field():
 def test_mcp_tool_rejects_malformed_sample_output():
     with pytest.raises(ToolError):
         call_tool("scan_outputs", {"sample_outputs": [123]})
+
+
+@pytest.mark.parametrize("tool_name", ["scan_outputs", "scan_injection_signals"])
+def test_mcp_tools_reject_oversized_sample_outputs(tool_name):
+    with pytest.raises(ToolError):
+        call_tool(tool_name, {"sample_outputs": ["x" * 8_001]})
+
+    with pytest.raises(ToolError):
+        call_tool(tool_name, {"sample_outputs": ["x" * 8_000] * 9})
+
+
+def test_mcp_argument_tool_rejects_oversized_serialized_arguments():
+    with pytest.raises(ToolError):
+        call_tool("check_tool_arguments", {"arguments": {"query": "x" * 16_000}})

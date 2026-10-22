@@ -11,5 +11,5 @@ secrets/
 *.key
 *.log
 *.db
-audit-report.json
-browser-check.json
+/audit-report*.json
+/browser-check*.json

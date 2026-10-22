@@ -7,6 +7,6 @@ Run these prompts one at a time.
 3. **Run app:** "Start the FastAPI app using uvicorn app.main:app --reload. Verify /health, /, and /docs. Do not claim success unless we see successful responses."
 4. **MCP compatibility:** "Check mcp_server.py against the installed official Python MCP SDK. Verify FastMCP import, tool signatures, and stdio transport. Make the smallest compatible change."
 5. **Quality tooling:** "Add Ruff and mypy with reasonable configuration. Run them and fix genuine issues without weakening tests."
-6. **Persistence:** "Add SQLite persistence for audit reports using SQLAlchemy. Do not persist raw sample outputs by default. Add tests and a retention/deletion approach."
-7. **Optional LLM:** "Design an optional LLM planner interface while keeping deterministic mode as default. Validate every proposed tool call against a fixed allowlist and schemas. Never permit arbitrary shell commands or Python execution."
+6. **Persistence:** "Review the existing SQLAlchemy, PostgreSQL, and Alembic persistence. Preserve audit history and never reset or downgrade the database. Add tests using isolated SQLite fixtures."
+7. **Optional local analysis:** "Review the optional local Ollama provider. Keep deterministic scoring authoritative, redact and bound inputs, validate model output, and never send samples to a cloud provider or execute model-generated instructions."
 8. **Evaluation:** "Create labeled synthetic benchmark fixtures and report precision, recall, and F1 for each detector. Describe limitations and distinguish simulated results from real privacy guarantees."

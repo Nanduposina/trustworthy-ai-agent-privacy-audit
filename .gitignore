@@ -28,5 +28,5 @@ secrets/
 Thumbs.db
 
 # Local browser/audit exports (keep docs/example-audit.json)
-/audit-report.json
-/browser-check.json
+/audit-report*.json
+/browser-check*.json
