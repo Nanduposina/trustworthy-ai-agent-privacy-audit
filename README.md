@@ -54,7 +54,7 @@ See [docs/architecture.md](docs/architecture.md) for component responsibilities,
 - Docker and Docker Compose as an optional local run method
 - SQLAlchemy 2.x, Alembic, PostgreSQL, and psycopg 3 for persistence
 
-Dependencies are listed in [requirements.txt](requirements.txt). Ollama is an optional local service and does not require an API key or added Python SDK.
+The local development/test dependency file is [requirements.txt](requirements.txt), which includes the application runtime, MCP SDK, and pytest. The Docker image installs only [requirements-runtime.txt](requirements-runtime.txt); it excludes test and MCP-only packages. Ollama is an optional local service and does not require an API key or added Python SDK.
 
 ## Windows setup (PowerShell)
 
@@ -163,40 +163,23 @@ Stop the services while preserving stored audits and the named PostgreSQL volume
 docker compose stop
 ```
 
-This stops the containers without removing them or the volume. Do not use `docker compose down --volumes` if you need to retain audit history.
+This stops the containers without removing them or the named volume. `docker compose down` also removes the containers and network while retaining the named `postgres_data` volume. Do not add the `--volumes` option: it permanently deletes the PostgreSQL volume and stored audit history.
 
 The Compose database, migration, and API services all receive the same `POSTGRES_*` values from `.env`. Do not define `DATABASE_URL` alongside them; the application rejects mixed configuration. SQLAlchemy's `URL` object is shared by FastAPI and Alembic. Alembic must render that object with its password visible to the in-memory config parser (which percent-encodes special characters); calling `str(URL)` masks the password as `***` and causes PostgreSQL authentication failures. The password is not printed by application or migration code.
 
-If authentication fails after changing `.env`, first rebuild and rerun the migration/API services:
+If authentication fails after changing `.env`, remember that the official PostgreSQL image applies `POSTGRES_PASSWORD` only when initializing an empty data directory. Changing `.env` does not change the password of a role in an existing volume. Preserve the volume while diagnosing the configured role and database; do not delete the volume as an authentication workaround. A forward migration is run by Compose before the API starts:
 
 ```powershell
 docker compose up -d --build api
 ```
 
-An existing PostgreSQL volume keeps the role password from its initial database setup; changing `.env` alone does not change that role. If a TCP probe confirms that the role password in PostgreSQL is stale, connect through the container's local socket and update it interactively without putting it in a command or shell history:
-
-```powershell
-docker compose exec db psql -U privacy_audit -d privacy_audit
-```
-
-At the `psql` prompt, run `\password privacy_audit` and enter the desired `.env` password at the hidden prompts, then `\q`. Substitute the configured role/database names if they differ. Verify TCP authentication without displaying the password, then rerun the migration/API command above:
+Use the configured role and database for any authentication diagnosis. If the stored role password needs repair, follow your database administrator's approved password recovery procedure and enter credentials through a secure interactive prompt. Do not put passwords in shell arguments, logs, or support output. A TCP authentication probe can use the container's environment without printing the password:
 
 ```powershell
 docker compose exec -T db sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT current_user, current_database();"'
 ```
 
-Do not remove the volume to resolve authentication problems; volume deletion removes stored audit reports.
-
-Stop the services while preserving audit records with `docker compose down`.
-
-To reset the local database and start with empty history:
-
-```powershell
-docker compose down --volumes
-docker compose up --build
-```
-
-**Warning:** `docker compose down --volumes` deletes the PostgreSQL volume and all audit records stored in it. The root-level SQLite `audit.db` used for non-Docker local development is separate and is not affected by this Compose reset.
+For a stop that retains containers and stored data, use `docker compose stop`. For a stop that also removes Compose containers and its network but retains the named database volume, use `docker compose down` without `--volumes`. Database resets are intentionally not part of the normal setup or demo workflow because they erase saved audit history.
 
 To run the separate MCP stdio server for an MCP-compatible client:
 
@@ -266,7 +249,7 @@ Accepts an `AuditRequest` JSON object:
 | Field | Type | Default | Constraints / behavior |
 |---|---|---|---|
 | `name` | string | `demo-model` | Trimmed; 1–100 characters |
-| `description` | string | empty | At most 1,000 characters; informational |
+| `description` | string | empty | Deprecated compatibility field; accepted but ignored and not stored |
 | `sample_outputs` | string array | `[]` | At most 100 samples; each sample is at most 8,000 characters and all samples together are at most 64,000 characters |
 | `tool_arguments` | object | `{}` | At most 16,000 UTF-8 bytes; checked against the tool argument allowlist and bounds |
 | `run_prompt_injection_scan` | boolean | `true` | Enables or skips the injection phrase scan |
@@ -432,7 +415,7 @@ Use the dashboard's **Download selected report (JSON)** button after running an 
 - Tool failures appear in the execution trace. Risk scoring is based on findings, so a failed check does not itself add risk points; inspect the trace when reviewing an audit.
 - Proposed tool arguments are validated but not executed. The app does not inspect the audited system's model weights or invoke that system; Ollama provides optional local contextual analysis only.
 - The API has no user authentication or authorization. Compose binds its port to localhost for local evaluation; add an appropriate access-control layer before any shared or public deployment.
-- Audit reports are persisted locally in SQLite or in the PostgreSQL database configured for Compose. Stored findings and traces may contain evidence snippets derived from sample text. Do not submit real personal data, credentials, or confidential information. Restrict access to the local database and back it up or reset it deliberately.
+- Audit reports are persisted locally in SQLite or in the PostgreSQL database configured for Compose. Stored findings and traces may contain evidence snippets derived from sample text. Do not submit real personal data, credentials, or confidential information. Restrict access to the local database and manage backups carefully.
 - When local AI is explicitly requested and `AI_PROVIDER=ollama`, sample outputs are sent to the configured local Ollama host after best-effort redaction of common email, phone, credential, and token patterns and an 8,000-character serialized-input limit. The configured endpoint is restricted to local host addresses, and cloud-tagged model names are rejected. Redaction cannot guarantee privacy; use synthetic inputs. This workflow does not send samples to a cloud AI provider.
 - Ollama output is untrusted, schema-validated data. Validation checks structure and that quoted evidence occurs in the input, but cannot establish that the model's interpretation or recommendation is correct. No model-generated tool calls or instructions are executed.
 - Local model assessments may vary between calls or model versions. Only the rule-based findings and their capped risk score use the deterministic scoring rules described above.

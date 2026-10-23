@@ -1,10 +1,9 @@
 FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-runtime.txt .
+RUN pip install --no-cache-dir -r requirements-runtime.txt
 COPY app ./app
-COPY mcp_server.py .
 COPY alembic.ini .
 COPY migrations ./migrations
 EXPOSE 8000

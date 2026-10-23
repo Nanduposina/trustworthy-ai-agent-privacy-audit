@@ -5,7 +5,6 @@ __pycache__
 .pytest_cache
 .env
 .env.*
-!.env.example
 secrets/
 *.pem
 *.key
@@ -13,3 +12,11 @@ secrets/
 *.db
 /audit-report*.json
 /browser-check*.json
+.github/
+docs/
+prompts/
+tests/
+LICENSE
+README.md
+requirements.txt
+mcp_server.py

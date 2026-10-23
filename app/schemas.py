@@ -11,7 +11,8 @@ MAX_TOOL_ARGUMENTS_BYTES = 16_000
 class AuditRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     name: str = Field(default="demo-model", min_length=1, max_length=100)
-    description: str = Field(default="", max_length=1000)
+    # Kept for existing clients; this field is intentionally not used or persisted.
+    description: str = Field(default="", max_length=1000, deprecated=True)
     sample_outputs: list[str] = Field(default_factory=list, max_length=100)
     tool_arguments: dict[str, Any] = Field(default_factory=dict)
     run_prompt_injection_scan: bool = True

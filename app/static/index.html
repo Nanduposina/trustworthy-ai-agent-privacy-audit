@@ -23,9 +23,6 @@
         <label for="name">Model / system name</label>
         <input id="name" maxlength="100" placeholder="e.g. synthetic-demo" required>
 
-        <label for="description">Description (optional)</label>
-        <input id="description" maxlength="1000" placeholder="Optional context (synthetic only)">
-
         <label for="outputs">Synthetic sample outputs (one per line)</label>
         <textarea id="outputs" placeholder="Synthetic example (placeholder only; not submitted unless entered):&#10;The service returned a successful response."></textarea>
         <p class="hint">Optional synthetic sample text. The example is placeholder text and is not submitted unless you enter it. Use synthetic data only. Heuristics can produce false positives and false negatives.</p>
@@ -379,7 +376,6 @@ form.addEventListener("submit", async event => {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         name: document.querySelector("#name").value,
-        description: document.querySelector("#description").value,
         sample_outputs: document.querySelector("#outputs").value.split("\n").map(value => value.trim()).filter(Boolean),
         tool_arguments: toolArguments,
         run_prompt_injection_scan: true,

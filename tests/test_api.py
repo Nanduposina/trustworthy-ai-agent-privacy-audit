@@ -70,7 +70,7 @@ def test_dashboard_audit_text_fields_are_empty_by_default():
         def handle_starttag(self, tag, attrs):
             attributes = dict(attrs)
             field_id = attributes.get("id")
-            if tag == "input" and field_id in {"name", "description"}:
+            if tag == "input" and field_id == "name":
                 self.inputs[field_id] = attributes
             elif tag == "textarea" and field_id in {"outputs", "args"}:
                 self.textareas[field_id] = {"attributes": attributes, "text": []}
@@ -87,15 +87,31 @@ def test_dashboard_audit_text_fields_are_empty_by_default():
     parser = AuditFormParser()
     parser.feed(client.get("/").text)
 
-    assert set(parser.inputs) == {"name", "description"}
+    assert set(parser.inputs) == {"name"}
     assert all("value" not in attributes for attributes in parser.inputs.values())
     assert "synthetic" in parser.inputs["name"]["placeholder"].lower()
-    assert "placeholder" in parser.inputs["description"]
+    assert 'id="description"' not in client.get("/").text
     assert set(parser.textareas) == {"outputs", "args"}
     assert all(not "".join(field["text"]).strip() for field in parser.textareas.values())
     assert "not submitted unless entered" in parser.textareas["outputs"]["attributes"]["placeholder"].lower()
     assert "blank submits as {}" in parser.textareas["args"]["attributes"]["placeholder"].lower()
     assert "toolArguments = argumentText ? JSON.parse(argumentText) : {};" in client.get("/").text
+
+
+def test_legacy_description_request_field_is_deprecated_and_ignored():
+    from app.schemas import AuditRequest
+
+    response = client.post("/api/audits", json={
+        "name": "synthetic-legacy-description",
+        "description": "Compatibility-only context",
+        "sample_outputs": [],
+        "tool_arguments": {},
+    })
+
+    assert response.status_code == 200
+    assert response.json()["model_name"] == "synthetic-legacy-description"
+    assert "description" not in response.json()
+    assert AuditRequest.model_json_schema()["properties"]["description"]["deprecated"] is True
 
 def test_ai_status_reports_local_provider_without_credentials(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "synthetic-test-key")
