@@ -145,6 +145,23 @@ def test_ollama_rejects_evidence_not_present_in_redacted_sample():
     assert result.reason == "unsupported_model_evidence"
 
 
+def test_ollama_retries_unsupported_evidence_and_requires_an_exact_quote():
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        evidence = "invented evidence" if len(requests) == 1 else "Synthetic sample"
+        return httpx.Response(200, json={"message": {"content": structured_response(evidence)}})
+
+    analyzer, _ = analyzer_for(handler)
+    result = analyzer.analyze(["Synthetic sample"])
+
+    assert result.status == "completed"
+    assert result.findings[0].evidence == "Synthetic sample"
+    assert len(requests) == MAX_VALIDATION_ATTEMPTS
+    assert "using only exact evidence quotes" in requests[1]["messages"][0]["content"]
+
+
 def test_ollama_rejects_oversized_http_response():
     requests = []
 
